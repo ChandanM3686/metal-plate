@@ -168,8 +168,7 @@ with col2:
                 1) Read clockwise from the top.
                 2) Keep layout, line breaks, and all characters.
                 3) If unclear, mark with [UNCLEAR:x].
-                4) Extract every visible alphanumeric character, even if faint, reflective, embossed, or partially obscured.
-                5) Return only extracted text — no explanation.
+                4) Return only extracted text — no explanation.
                 """}
             ])
             result_text = response.text.strip()
