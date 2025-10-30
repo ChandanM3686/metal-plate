@@ -6,9 +6,106 @@ import google.generativeai as genai
 from PIL import Image
 import io
 
+# Image processing imports
+import cv2
+import numpy as np
+
 # --- CONFIGURE GEMINI DIRECTLY ---
+# Hardcoded key (you already set this earlier)
 genai.configure(api_key="AIzaSyAJVC1UYqgv1DsPD52skz3y9n0YMG7UO2w")
 model = genai.GenerativeModel("gemini-2.0-flash")
+
+# --- Utility: Preprocess Image for embossed metal OCR ---
+def preprocess_image(file_bytes, target_max_dim=1600):
+    """
+    Preprocess an image for embossed/metal OCR:
+    - Resize
+    - Grayscale + bilateral filter (edge-preserving denoise)
+    - CLAHE (local contrast enhancement)
+    - Unsharp mask (sharpen)
+    - Adaptive threshold + morphology to emphasize strokes
+    - Deskew based on largest contour
+    Returns JPEG bytes.
+    """
+    # decode bytes to cv2 image
+    nparr = np.frombuffer(file_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Failed to decode image bytes")
+
+    # resize (preserve aspect)
+    h, w = img.shape[:2]
+    max_dim = max(h, w)
+    scale = 1.0
+    if max_dim > target_max_dim:
+        scale = target_max_dim / max_dim
+    elif max_dim < 500:
+        scale = min(1.0, 500 / max_dim)
+    if scale != 1.0:
+        img = cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_LINEAR)
+
+    # convert to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # bilateral filter to remove noise but keep edges
+    gray = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
+
+    # CLAHE
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    gray = clahe.apply(gray)
+
+    # Unsharp mask (sharpen)
+    gaussian = cv2.GaussianBlur(gray, (0,0), sigmaX=3)
+    unsharp = cv2.addWeighted(gray, 1.5, gaussian, -0.5, 0)
+
+    # Adaptive threshold (binary-like to emphasize strokes)
+    th = cv2.adaptiveThreshold(unsharp, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                               cv2.THRESH_BINARY_INV, 31, 12)
+
+    # Morphology to clean noise
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
+    morph = cv2.morphologyEx(th, cv2.MORPH_OPEN, kernel, iterations=1)
+    morph = cv2.morphologyEx(morph, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # Deskew: rotate using minAreaRect of largest contour if meaningful
+    contours, _ = cv2.findContours(morph.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        largest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest)
+        if area > 0.01 * (morph.shape[0]*morph.shape[1]):
+            rect = cv2.minAreaRect(largest)
+            angle = rect[-1]
+            if angle < -45:
+                angle = 90 + angle
+            if abs(angle) > 1.0:
+                (h2, w2) = img.shape[:2]
+                center = (w2 // 2, h2 // 2)
+                M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                img = cv2.warpAffine(img, M, (w2, h2), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+                # re-run a bit of processing after rotate
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                gray = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
+                gray = clahe.apply(gray)
+                gaussian = cv2.GaussianBlur(gray, (0,0), sigmaX=3)
+                unsharp = cv2.addWeighted(gray, 1.5, gaussian, -0.5, 0)
+                th = cv2.adaptiveThreshold(unsharp, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                           cv2.THRESH_BINARY_INV, 31, 12)
+                morph = cv2.morphologyEx(th, cv2.MORPH_OPEN, kernel, iterations=1)
+                morph = cv2.morphologyEx(morph, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # Combine sharpened color image with mask to emphasize characters visually (helps model)
+    pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    pil_mask = Image.fromarray(morph).convert("L")
+
+    # Composite over white background using mask as alpha to highlight markings
+    background = Image.new("RGB", pil_img.size, (255,255,255))
+    background.paste(pil_img, mask=pil_mask)
+
+    out_buf = io.BytesIO()
+    background.save(out_buf, format="JPEG", quality=92)
+    return out_buf.getvalue()
+
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -17,7 +114,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- CUSTOM THEME STYLING ---
+# --- CUSTOM THEME STYLING (kept minimal to match your UI) ---
 st.markdown("""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500&display=swap');
@@ -28,113 +125,26 @@ st.markdown("""
             color: #E0E0E0;
         }
         #MainMenu, footer, header {visibility: hidden;}
-        section[data-testid="stSidebar"] {
-            background: linear-gradient(135deg, #181818 0%, #222 100%);
-            border-right: 2px solid rgba(218, 41, 28, 0.4);
-        }
-        h1 {
-            text-align: center;
-            font-weight: 800;
-            font-size: 2.8rem;
-            letter-spacing: 0.5px;
-            padding-bottom: 0.3em;
-            border-bottom: 2px solid #FFD700;
-            display: inline-block;
-            background: linear-gradient(90deg, #c8102e, #a60e28);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-            position: relative;
-        }
-        h1::after {
-            content: "";
-            position: absolute;
-            left: 0; right: 0; bottom: -4px;
-            height: 2px;
-            background: linear-gradient(to right, #FFD700, #c8102e, #FFD700);
-            opacity: 0.8;
-            border-radius: 1px;
-        }
-        .hero-title {
-            font-family: 'Poppins', sans-serif;
-            font-weight: 650;
-            font-size: 3rem;
-            text-align: center;
-            text-transform: uppercase;
-            margin: 2.2rem auto 1rem auto;
-            background: linear-gradient(90deg, #ff1a1a, #e60000, #ff3333);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            -webkit-text-stroke: 0.6px #1a1a1a; 
-            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.35),
-                         0 0 8px rgba(255, 50, 50, 0.7);
-        }
-        .hero-sub {
-            color: #FFD700;
-            text-align: center;
-            font-weight: 500;
-            font-size: 1.05rem;
-            margin: 0.2rem 0 1.4rem 0;
-        }
     </style>
 """, unsafe_allow_html=True)
 
 # --- HEADER ---
 st.markdown("""
-<div class="hero-title">Metal</div>
-<div class="hero-sub">Ensure Quality. Detect with Precision. Powered by AI.</div>
+<div style="font-family:Poppins, sans-serif; font-weight:700; font-size:34px; text-align:center; color:#FFD700;">Metal Surface Text Extractor</div>
+<div style="text-align:center; color:#FFD700; margin-bottom:18px;">Ensure Quality. Detect with Precision. Powered by AI.</div>
 """, unsafe_allow_html=True)
 
-# --- SIDE-BY-SIDE LAYOUT ---
-col1, col2 = st.columns([1, 1])
+# --- LAYOUT: Image upload / camera & analyze ---
+col1, col2 = st.columns([1,1])
 
-# --- LEFT COLUMN ---
 with col1:
     st.markdown("""
-    <style>
-    .logo-text {
-        font-family: 'Poppins', sans-serif;
-        font-size: 5.1rem;
-        font-weight: 500;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        text-align: center;
-        margin: 4rem 0 1rem 0;
-        padding-top: 2rem; 
-        background: linear-gradient(90deg, #c8102e, #a60e28, #8b0d23);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        -webkit-text-stroke: 2px #FFD700;
-        text-shadow: 
-            0 2px 6px rgba(0, 0, 0, 0.6),
-            0 0 12px rgba(255, 215, 0, 0.6),
-            0 0 24px rgba(200, 16, 46, 0.8);
-        animation: glowPulse 2s infinite alternate;
-    }
-    @keyframes glowPulse {
-        from {
-            text-shadow: 
-                0 2px 6px rgba(0, 0, 0, 0.6),
-                0 0 12px rgba(255, 215, 0, 0.5),
-                0 0 24px rgba(200, 16, 46, 0.7);
-        }
-        to {
-            text-shadow: 
-                0 2px 6px rgba(0, 0, 0, 0.6),
-                0 0 18px rgba(255, 215, 0, 0.9),
-                0 0 36px rgba(200, 16, 46, 1);
-        }
-    }
-    </style>
-    <div class="logo-text">Metal Surface Text Extractor</div>
+    <div style="font-size:48px; font-weight:600; text-align:center; margin-top:30px; -webkit-text-stroke:0.6px #1a1a1a; color:transparent;
+                 background:linear-gradient(90deg,#ff1a1a,#e60000,#ff3333); -webkit-background-clip:text;">Metal Surface Text Extractor</div>
     """, unsafe_allow_html=True)
 
-# --- RIGHT COLUMN ---
 with col2:
-    st.markdown("""
-    <div style="text-align:center; font-size:2.1rem; font-weight:600; color:#fff; text-shadow:0 1px 3px rgba(0,0,0,0.4);">Upload / Capture Image</div>
-    """, unsafe_allow_html=True)
-
+    st.markdown("""<div style="text-align:center; font-size:20px; color:#fff; margin-top:20px;">Upload / Capture Image</div>""", unsafe_allow_html=True)
     tab_gallery, tab_camera = st.tabs(["🖼️ Gallery", "📷 Camera"])
 
     picture = None
@@ -159,32 +169,68 @@ with col2:
 
     if analyze_button and final_image:
         with st.spinner("⚙️ Processing image..."):
-            image_bytes = final_image.getvalue()
-response = model.generate_content([
-    {"mime_type": "image/jpeg", "data": image_bytes},
-    {"text": """
+            raw_bytes = final_image.getvalue()
+
+            # 1) Try preprocessing (preferred)
+            try:
+                processed_bytes = preprocess_image(raw_bytes)
+            except Exception as e:
+                st.warning(f"Preprocessing failed, using raw image. ({e})")
+                processed_bytes = raw_bytes
+
+            # 2) Prepare a strict OCR prompt tuned for embossed metal text
+            ocr_prompt = """
 You are a precision OCR system specialized in reading embossed or engraved text on metallic and industrial surfaces.
 
 Your task:
 - Extract every alphanumeric character clearly visible on the metal surface.
-- Handle glare, shadows, reflection, and partial visibility.
+- Handle glare, shadows, reflection, rotation, and partial visibility.
 - Reconstruct continuous identifiers correctly — for example:
-  • “C19 81” → “C1981”
-  • “JL3 W-4851-BB” → “JL3W-4851-BB”
+  • "C19 81" -> "C1981"
+  • "JL3 W-4851-BB" -> "JL3W-4851-BB"
 - Do NOT add spaces inside serial numbers, years, or part codes.
-- If a character is slightly unclear, infer it intelligently from context rather than splitting it.
-- Preserve order as it appears clockwise from the top.
-- Ignore bolts, edges, or scratches that resemble letters.
+- If a character is slightly unclear, infer it intelligently from surrounding context rather than splitting it.
+- Read text in clockwise order starting from the topmost region.
+- Ignore bolts, scratches, background textures that look like letters.
 
 Output:
-- Return ONLY the extracted text, cleaned and continuous.
-- No explanation, no formatting, no punctuation beyond what’s visible (like hyphens).
+- Return ONLY the extracted, cleaned text.
+- No explanation, no commentary, no extra formatting.
 - Each separate marking or code on a new line.
-"""}
-])
-result_text = response.text.strip()
+"""
 
-st.markdown(f"""
+            # 3) Send processed image to Gemini
+            try:
+                response = model.generate_content([
+                    {"mime_type": "image/jpeg", "data": processed_bytes},
+                    {"text": ocr_prompt}
+                ])
+                # `response.text` should contain the output for the model usage pattern used earlier
+                result_text = getattr(response, "text", None)
+                if not result_text:
+                    # some SDK versions may return nested content; attempt other access patterns
+                    try:
+                        # try to access top-level 'candidates' or similar
+                        result_text = str(response)
+                    except Exception:
+                        result_text = ""
+                result_text = (result_text or "").strip()
+            except Exception as e:
+                # fallback: try original raw bytes
+                st.warning(f"Model call on processed image failed, retrying with raw image. ({e})")
+                try:
+                    response = model.generate_content([
+                        {"mime_type": "image/jpeg", "data": raw_bytes},
+                        {"text": ocr_prompt}
+                    ])
+                    result_text = getattr(response, "text", "") or ""
+                    result_text = result_text.strip()
+                except Exception as ex:
+                    st.error("Model call failed. Check API key and network.")
+                    result_text = ""
+
+        # 4) Display result (same style as before)
+        st.markdown(f"""
         <div style="
             background: rgba(20, 20, 20, 0.85);
             border: 2px solid #FFD700;
@@ -198,7 +244,7 @@ st.markdown(f"""
                 🛠️ Chassis Number
             </h3>
             <div style="color: #FFD700; font-size: 1.4rem; font-weight: bold; letter-spacing: 2px;">
-                {result_text}
+                {st.session_state.setdefault('ocr_result', result_text)}
             </div>
         </div>
         """, unsafe_allow_html=True)
