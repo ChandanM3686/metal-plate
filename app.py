@@ -160,20 +160,31 @@ with col2:
     if analyze_button and final_image:
         with st.spinner("⚙️ Processing image..."):
             image_bytes = final_image.getvalue()
-            response = model.generate_content([
-                {"mime_type": "image/jpeg", "data": image_bytes},
-                {"text": """
-                Read and extract all text visible on the metal surface.
-                Rules:
-                1) Read clockwise from the top.
-                2) Keep layout, line breaks, and all characters.
-                3) If unclear, mark with [UNCLEAR:x].
-                4) Return only extracted text — no explanation.
-                """}
-            ])
-            result_text = response.text.strip()
+response = model.generate_content([
+    {"mime_type": "image/jpeg", "data": image_bytes},
+    {"text": """
+You are a precision OCR system specialized in reading embossed or engraved text on metallic and industrial surfaces.
 
-        st.markdown(f"""
+Your task:
+- Extract every alphanumeric character clearly visible on the metal surface.
+- Handle glare, shadows, reflection, and partial visibility.
+- Reconstruct continuous identifiers correctly — for example:
+  • “C19 81” → “C1981”
+  • “JL3 W-4851-BB” → “JL3W-4851-BB”
+- Do NOT add spaces inside serial numbers, years, or part codes.
+- If a character is slightly unclear, infer it intelligently from context rather than splitting it.
+- Preserve order as it appears clockwise from the top.
+- Ignore bolts, edges, or scratches that resemble letters.
+
+Output:
+- Return ONLY the extracted text, cleaned and continuous.
+- No explanation, no formatting, no punctuation beyond what’s visible (like hyphens).
+- Each separate marking or code on a new line.
+"""}
+])
+result_text = response.text.strip()
+
+st.markdown(f"""
         <div style="
             background: rgba(20, 20, 20, 0.85);
             border: 2px solid #FFD700;
