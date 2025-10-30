@@ -2,7 +2,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 import os
 import base64
-from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from typing import  Annotated
@@ -527,3 +526,4 @@ Rules:
         """,
         unsafe_allow_html=True
     )
+
